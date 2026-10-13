@@ -1,0 +1,605 @@
+// main.dart
+import 'dart:async';
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import 'package:audioplayers/audioplayers.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const AlarmClockApp());
+}
+
+class AlarmClockApp extends StatelessWidget {
+  const AlarmClockApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'ساعة التنبيه',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        primaryColor: const Color(0xFF4CAF50),
+        fontFamily: 'Cairo',
+        useMaterial3: true,
+      ),
+      home: const AlarmHomePage(),
+    );
+  }
+}
+
+// ==================== نموذج التنبيه ====================
+class Alarm {
+  String id;
+  int hour;
+  int minute;
+  String label;
+  String sound;
+  bool repeatDaily;
+  bool autoSnooze;
+  int snoozeDuration; // بالدقائق
+  bool enabled;
+
+  Alarm({
+    required this.id,
+    required this.hour,
+    required this.minute,
+    required this.label,
+    required this.sound,
+    required this.repeatDaily,
+    required this.autoSnooze,
+    required this.snoozeDuration,
+    this.enabled = true,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'hour': hour,
+        'minute': minute,
+        'label': label,
+        'sound': sound,
+        'repeatDaily': repeatDaily,
+        'autoSnooze': autoSnooze,
+        'snoozeDuration': snoozeDuration,
+        'enabled': enabled,
+      };
+
+  factory Alarm.fromJson(Map<String, dynamic> json) => Alarm(
+        id: json['id'],
+        hour: json['hour'],
+        minute: json['minute'],
+        label: json['label'],
+        sound: json['sound'],
+        repeatDaily: json['repeatDaily'],
+        autoSnooze: json['autoSnooze'],
+        snoozeDuration: json['snoozeDuration'],
+        enabled: json['enabled'] ?? true,
+      );
+}
+
+// ==================== الصفحة الرئيسية ====================
+class AlarmHomePage extends StatefulWidget {
+  const AlarmHomePage({super.key});
+
+  @override
+  State<AlarmHomePage> createState() => _AlarmHomePageState();
+}
+
+class _AlarmHomePageState extends State<AlarmHomePage> {
+  List<Alarm> alarms = [];
+  DateTime currentTime = DateTime.now();
+  Timer? _clockTimer;
+  Timer? _checkTimer;
+  bool _nightMode = false;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  String? _activeAlarmId;
+  Timer? _autoSnoozeTimer;
+
+  // قائمة النغمات المتاحة (ملفات صوتية - يمكنك إضافة ملفاتك في مجلد assets)
+  final Map<String, String> soundNames = {
+    'beep': '🔔 بيب كلاسيكي',
+    'chime': '🎵 نغمة موسيقية',
+    'radar': '📡 رادار',
+    'gentle': '🌿 نغمة هادئة',
+    'urgent': '⚠️ نغمة عاجلة',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAlarms();
+    _loadNightMode();
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => currentTime = DateTime.now());
+    });
+    _checkTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _checkAlarms();
+    });
+  }
+
+  @override
+  void dispose() {
+    _clockTimer?.cancel();
+    _checkTimer?.cancel();
+    _autoSnoozeTimer?.cancel();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  // ---------- التخزين ----------
+  Future<void> _loadAlarms() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = prefs.getString('alarms');
+    if (data != null) {
+      final List decoded = jsonDecode(data);
+      setState(() {
+        alarms = decoded.map((e) => Alarm.fromJson(e)).toList();
+      });
+    }
+  }
+
+  Future<void> _saveAlarms() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = jsonEncode(alarms.map((a) => a.toJson()).toList());
+    await prefs.setString('alarms', data);
+  }
+
+  Future<void> _loadNightMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() => _nightMode = prefs.getBool('nightMode') ?? false);
+  }
+
+  Future<void> _toggleNightMode(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('nightMode', value);
+    setState(() => _nightMode = value);
+  }
+
+  // ---------- إضافة تنبيه ----------
+  Future<void> _showAddAlarmDialog() async {
+    TimeOfDay selectedTime = TimeOfDay.now();
+    String label = '';
+    String sound = 'beep';
+    bool repeatDaily = false;
+    bool autoSnooze = false;
+    int snoozeDuration = 5;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFF1E1E1E),
+              title: const Text('⏰ إضافة تنبيه جديد',
+                  style: TextStyle(color: Color(0xFF4CAF50))),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // اختيار الوقت
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('الوقت',
+                          style: TextStyle(color: Colors.white70)),
+                      trailing: Text(
+                        selectedTime.format(context),
+                        style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white),
+                      ),
+                      onTap: () async {
+                        final picked = await showTimePicker(
+                          context: context,
+                          initialTime: selectedTime,
+                          builder: (context, child) {
+                            return Theme(
+                              data: ThemeData.dark().copyWith(
+                                colorScheme: const ColorScheme.dark(
+                                  primary: Color(0xFF4CAF50),
+                                ),
+                              ),
+                              child: child!,
+                            );
+                          },
+                        );
+                        if (picked != null) {
+                          setDialogState(() => selectedTime = picked);
+                        }
+                      },
+                    ),
+                    const Divider(color: Colors.white24),
+                    // الوصف
+                    TextField(
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: 'وصف التنبيه (اختياري)',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        enabledBorder: UnderlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white30),
+                        ),
+                      ),
+                      onChanged: (v) => label = v,
+                    ),
+                    const SizedBox(height: 16),
+                    // النغمة
+                    DropdownButtonFormField<String>(
+                      value: sound,
+                      dropdownColor: const Color(0xFF2A2A2A),
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: 'نغمة التنبيه',
+                        labelStyle: TextStyle(color: Colors.white70),
+                      ),
+                      items: soundNames.entries.map((e) {
+                        return DropdownMenuItem(
+                          value: e.key,
+                          child: Text(e.value),
+                        );
+                      }).toList(),
+                      onChanged: (v) => setDialogState(() => sound = v!),
+                    ),
+                    const SizedBox(height: 16),
+                    // مدة الغفوة
+                    DropdownButtonFormField<int>(
+                      value: snoozeDuration,
+                      dropdownColor: const Color(0xFF2A2A2A),
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: 'مدة الغفوة (دقائق)',
+                        labelStyle: TextStyle(color: Colors.white70),
+                      ),
+                      items: [1, 3, 5, 10, 15].map((e) {
+                        return DropdownMenuItem(
+                          value: e,
+                          child: Text('$e دقيقة'),
+                        );
+                      }).toList(),
+                      onChanged: (v) =>
+                          setDialogState(() => snoozeDuration = v!),
+                    ),
+                    const SizedBox(height: 8),
+                    // تكرار يومي
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('🔁 تكرار يومي',
+                          style: TextStyle(color: Colors.white)),
+                      value: repeatDaily,
+                      activeColor: const Color(0xFF4CAF50),
+                      onChanged: (v) =>
+                          setDialogState(() => repeatDaily = v!),
+                    ),
+                    // غفوة تلقائية
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('😴 غفوة تلقائية',
+                          style: TextStyle(color: Colors.white)),
+                      value: autoSnooze,
+                      activeColor: const Color(0xFF4CAF50),
+                      onChanged: (v) =>
+                          setDialogState(() => autoSnooze = v!),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('إلغاء',
+                      style: TextStyle(color: Colors.white70)),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                  ),
+                  onPressed: () {
+                    _addAlarm(
+                      hour: selectedTime.hour,
+                      minute: selectedTime.minute,
+                      label: label.isEmpty ? 'تنبيه' : label,
+                      sound: sound,
+                      repeatDaily: repeatDaily,
+                      autoSnooze: autoSnooze,
+                      snoozeDuration: snoozeDuration,
+                    );
+                    Navigator.pop(context);
+                  },
+                  child: const Text('إضافة'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _addAlarm({
+    required int hour,
+    required int minute,
+    required String label,
+    required String sound,
+    required bool repeatDaily,
+    required bool autoSnooze,
+    required int snoozeDuration,
+  }) {
+    final alarm = Alarm(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      hour: hour,
+      minute: minute,
+      label: label,
+      sound: sound,
+      repeatDaily: repeatDaily,
+      autoSnooze: autoSnooze,
+      snoozeDuration: snoozeDuration,
+    );
+    setState(() => alarms.add(alarm));
+    _saveAlarms();
+  }
+
+  void _deleteAlarm(String id) {
+    setState(() => alarms.removeWhere((a) => a.id == id));
+    _saveAlarms();
+    if (_activeAlarmId == id) _stopAlarm();
+  }
+
+  void _toggleAlarm(String id) {
+    setState(() {
+      final alarm = alarms.firstWhere((a) => a.id == id);
+      alarm.enabled = !alarm.enabled;
+    });
+    _saveAlarms();
+  }
+
+  // ---------- فحص التنبيهات ----------
+  void _checkAlarms() {
+    if (_activeAlarmId != null) return;
+    final now = DateTime.now();
+    for (final alarm in alarms) {
+      if (!alarm.enabled) continue;
+      if (alarm.hour == now.hour &&
+          alarm.minute == now.minute &&
+          now.second == 0) {
+        _triggerAlarm(alarm);
+        break;
+      }
+    }
+  }
+
+  // ---------- إطلاق التنبيه ----------
+  Future<void> _triggerAlarm(Alarm alarm) async {
+    setState(() => _activeAlarmId = alarm.id);
+    HapticFeedback.heavyImpact();
+
+    // تشغيل الصوت (يمكنك استبدال الملفات بأصوات مخصصة)
+    try {
+      // ملاحظة: يجب إضافة ملفات الصوت في مجلد assets وإضافتها في pubspec.yaml
+      // await _audioPlayer.play(AssetSource('sounds/${alarm.sound}.mp3'));
+      // حالياً سنستخدم صوت النظام كبديل
+    } catch (e) {
+      debugPrint('خطأ في تشغيل الصوت: $e');
+    }
+
+    // نافذة التنبيه
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return WillPopScope(
+          onWillPop: () async => false,
+          child: AlertDialog(
+            backgroundColor: const Color(0xFF1E1E1E),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: const BorderSide(color: Color(0xFF4CAF50), width: 2),
+            ),
+            title: const Center(
+              child: Text('⏰ حان وقت التنبيه!',
+                  style: TextStyle(
+                      color: Color(0xFF4CAF50),
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold)),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${alarm.hour.toString().padLeft(2, '0')}:${alarm.minute.toString().padLeft(2, '0')}',
+                  style: const TextStyle(
+                    fontSize: 40,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                    letterSpacing: 3,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  alarm.label,
+                  style: const TextStyle(fontSize: 18, color: Colors.white70),
+                  textAlign: TextAlign.center,
+                ),
+                if (alarm.autoSnooze) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    '⏳ سيتم الغفوة تلقائياً بعد ${alarm.snoozeDuration} دقيقة',
+                    style: const TextStyle(
+                        color: Color(0xFFFF9800), fontSize: 13),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ],
+            ),
+            actions: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF9800),
+                      foregroundColor: Colors.black,
+                    ),
+                    onPressed: () => _snoozeAlarm(alarm),
+                    icon: const Icon(Icons.snooze),
+                    label: const Text('غفوة'),
+                  ),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFF44336),
+                    ),
+                    onPressed: _stopAlarm,
+                    icon: const Icon(Icons.stop),
+                    label: const Text('إيقاف'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    // الغفوة التلقائية
+    if (alarm.autoSnooze) {
+      _autoSnoozeTimer?.cancel();
+      _autoSnoozeTimer = Timer(
+        Duration(minutes: alarm.snoozeDuration),
+        () {
+          if (_activeAlarmId == alarm.id && mounted) {
+            _snoozeAlarm(alarm);
+          }
+        },
+      );
+    }
+  }
+
+  void _stopAlarm() {
+    _autoSnoozeTimer?.cancel();
+    _audioPlayer.stop();
+    if (mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      setState(() => _activeAlarmId = null);
+    }
+  }
+
+  void _snoozeAlarm(Alarm alarm) {
+    _autoSnoozeTimer?.cancel();
+    _audioPlayer.stop();
+
+    final now = DateTime.now();
+    final snoozeTime = now.add(Duration(minutes: alarm.snoozeDuration));
+
+    final snoozeAlarm = Alarm(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      hour: snoozeTime.hour,
+      minute: snoozeTime.minute,
+      label: '⏰ غفوة: ${alarm.label}',
+      sound: alarm.sound,
+      repeatDaily: false,
+      autoSnooze: false,
+      snoozeDuration: alarm.snoozeDuration,
+    );
+
+    setState(() {
+      alarms.add(snoozeAlarm);
+      _activeAlarmId = null;
+    });
+    _saveAlarms();
+
+    if (mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'تم ضبط غفوة حتى ${snoozeTime.hour.toString().padLeft(2, '0')}:${snoozeTime.minute.toString().padLeft(2, '0')}',
+          ),
+          backgroundColor: const Color(0xFFFF9800),
+        ),
+      );
+    }
+  }
+
+  // ---------- تنسيق الوقت ----------
+  String _formatTime(DateTime dt) {
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bgColor = _nightMode ? Colors.black : const Color(0xFF121212);
+    final cardColor = _nightMode ? const Color(0xFF0A0A0A) : const Color(0xFF1E1E1E);
+    final textColor = _nightMode ? Colors.white54 : Colors.white;
+
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(
+        backgroundColor: bgColor,
+        elevation: 0,
+        title: const Text(
+          '⏰ ساعة التنبيه',
+          style: TextStyle(
+              color: Color(0xFF4CAF50), fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: Icon(
+              _nightMode ? Icons.brightness_2 : Icons.brightness_7,
+              color: _nightMode ? Colors.amber : Colors.white70,
+            ),
+            tooltip: 'وضع الليل',
+            onPressed: () => _toggleNightMode(!_nightMode),
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            // عرض الوقت الحالي
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              decoration: BoxDecoration(
+                color: cardColor,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: _nightMode ? Colors.white12 : const Color(0xFF4CAF50),
+                  width: 1,
+                ),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    _formatTime(currentTime),
+                    style: TextStyle(
+                      fontSize: 42,
+                      fontWeight: FontWeight.bold,
+                      color: textColor,
+                      letterSpacing: 4,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '${currentTime.day}/${currentTime.month}/${currentTime.year}',
+                    style: TextStyle(color: Colors.white54, fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // قائمة التنبيهات
+            Expanded(
+              child: alarms.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.alarm_off,
+                              size: 70, 
