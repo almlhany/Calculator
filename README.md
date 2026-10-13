@@ -1,2 +1,13 @@
-# Calculator
-Flutter project created by KLENCOD IDE
+# الحاسبة العلمية
+
+قالب Flutter جاهز لـ Klencod IDE بواجهة علمية داكنة مستوحاة من الآلات الحاسبة العلمية المتقدمة.
+
+### الوظائف
+- + − × ÷ والأقواس والأسس والجذور.
+- Sin/Cos/Tan و الدوال العكسية مع SHIFT.
+- DEG/RAD.
+- Log و Ln و Abs و π و e.
+- النسبة المئوية، Factorial، nPr، nCr.
+- الذاكرة M+ / M− / RCL.
+- Ans وسجل History.
+- يعمل بالكامل دون API أو اتصال إنترنت.
